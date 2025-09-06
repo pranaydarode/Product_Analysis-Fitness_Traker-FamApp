@@ -1,0 +1,75 @@
+PeakPulse — Power BI Model & Dashboard Guide
+================================================
+
+FILES
+- users.csv, subscriptions.csv, daily_scores.csv, sleep_data.csv, activity_data.csv, app_sessions.csv, app_events.csv
+
+RELATIONSHIPS
+- Date[Date] -> daily_scores[date], app_sessions[session_start], app_events[event_time], activity_data[activity_start]
+- users[user_id] 1-* to each fact table's user_id
+
+DATE TABLE (DAX)
+Date = 
+ADDCOLUMNS(
+  CALENDAR ( DATE(2019,1,1), DATE(2030,12,31) ),
+  "Year", YEAR([Date]),
+  "Month", FORMAT([Date], "YYYY-MM"),
+  "WeekStart", [Date] - WEEKDAY([Date],2) + 1,
+  "MonthStart", DATE(YEAR([Date]), MONTH([Date]), 1)
+)
+
+MEASURES (DAX)
+Active Users =
+VAR SessionFlag = CALCULATE ( DISTINCTCOUNT(app_sessions[session_id]), app_sessions[session_duration_seconds] >= 30 )
+VAR SyncFlag    = CALCULATE ( DISTINCTCOUNT(app_events[event_id]), CONTAINSSTRING( LOWER(app_events[event_name]), "sync" ) )
+VAR CoreFeature = CALCULATE ( DISTINCTCOUNT(app_events[event_id]),
+  CONTAINSSTRING(LOWER(app_events[feature_category]), "recovery") ||
+  CONTAINSSTRING(LOWER(app_events[feature_category]), "strain") ||
+  CONTAINSSTRING(LOWER(app_events[feature_category]), "sleep") ||
+  CONTAINSSTRING(LOWER(app_events[event_name]), "recovery") ||
+  CONTAINSSTRING(LOWER(app_events[event_name]), "strain") ||
+  CONTAINSSTRING(LOWER(app_events[event_name]), "sleep")
+)
+VAR WorkoutFlag = CALCULATE ( DISTINCTCOUNT(activity_data[activity_id]) )
+RETURN IF ( SessionFlag + SyncFlag + CoreFeature + WorkoutFlag > 0, 1, 0 )
+
+DAU = SUMX ( VALUES(Date[Date]), [Active Users] )
+WAU = VAR wk = SELECTEDVALUE(Date[WeekStart]) RETURN CALCULATE([DAU], FILTER(ALL(Date), Date[WeekStart]=wk))
+MAU = VAR mo = SELECTEDVALUE(Date[MonthStart]) RETURN CALCULATE([DAU], FILTER(ALL(Date), Date[MonthStart]=mo))
+
+Conversion Rate =
+DIVIDE(
+  CALCULATE( DISTINCTCOUNT(subscriptions[user_id]), NOT subscriptions[is_canceled], NOT ISBLANK(subscriptions[subscription_start_date]) ),
+  DISTINCTCOUNT(users[user_id])
+)
+
+Renewal Rate =
+AVERAGEX(
+  VALUES(subscriptions[user_id]),
+  VAR dur = DATEDIFF( MIN(subscriptions[subscription_start_date]), MAX(subscriptions[subscription_end_date]), DAY )
+  RETURN IF ( dur >= 30 && NOT MAX(subscriptions[is_canceled]), 1, 0 )
+)
+
+Crash Rate = DIVIDE( CALCULATE(COUNTROWS(app_sessions), app_sessions[is_crashed]=TRUE()), COUNTROWS(app_sessions) )
+Avg Session Minutes = AVERAGE(app_sessions[session_duration_seconds]) / 60
+Workouts per Week = AVERAGEX( VALUES(Date[WeekStart]), CALCULATE(DISTINCTCOUNT(activity_data[activity_id])) )
+Sleep Coach Adoption % =
+DIVIDE( CALCULATE( DISTINCTCOUNT(app_events[user_id]), CONTAINSSTRING(LOWER(app_events[event_name]), "sleep_coach") ), DISTINCTCOUNT(users[user_id]) )
+
+POWER QUERY M TIP (app_sessions typing)
+let
+  Source = Csv.Document(File.Contents("app_sessions.csv"),[Delimiter=",",Encoding=65001,QuoteStyle=QuoteStyle.Csv]),
+  Promote = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
+  Types = Table.TransformColumnTypes(Promote,{
+    {"session_start", type datetime},{"session_end", type datetime},
+    {"session_duration_seconds", Int64.Type},{"is_crashed", type logical}
+  })
+in
+  Types
+
+PAGES & VISUALS
+1) Overview — Cards: DAU/WAU/MAU, Renewal vs Target; Line: DAU trend; Funnel: Signup→Onboarded→Trial→Active
+2) Retention — Cohort matrix, D1/D7/D30/D90 trend
+3) Features — Adoption %, correlation scatter; Sleep Coach trend
+4) Community — Challenges participation & completion; Leaderboard
+5) Stability — Crash rate by app_version/platform; ANRs if available
